@@ -8,7 +8,7 @@
 # Original Author: Daniel Siegmanski
 
 # Hier werden verschiedene Variablen definiert.
-version=20251010	# Die Version von OtrCut, Format: yyyymmdd, yyyy=Jahr mm=Monat dd=Tag
+version=20251024	# Die Version von OtrCut, Format: yyyymmdd, yyyy=Jahr mm=Monat dd=Tag
 LocalCutlistOkay=no	# Ist die lokale Cutlist vorhanden?
 input=""			# Eingabedatei/en
 LocalCutlistName=""	# Name der lokalen Cutlist
@@ -35,8 +35,9 @@ bewertung=no		# Bewertungsfunktion benutzen
 verbose=yes			# Ausführliche Ausgabe von ffmpeg anzeigen
 warn=yes			# Warnung bezüglich der Löschung von $tmp ausgeben
 user=otrcut			# Benutzer der zum Bewerten benutzt wird
-vcodec=copy			# Input-Video nur kopieren.
-acodec=copy			# Input-Audio nur kopieren.
+vcodec=copy			# Input-Video nur kopieren
+acodec=copy			# Input-Audio nur kopieren
+keyframes=no		# Keyframes neu generieren, wenn nicht darauf geschnitten ist
 copy=no				# Wenn $toprated=yes, und keine Cutlist gefunden wird, $film nach $output kopieren
 move=no				# Wenn $toprated=yes, und keine Cutlist gefunden wird, $film nach $output verschieben
 
@@ -101,10 +102,19 @@ Optionen:
 
 --server		URL des Cutlist-Servers. Standard ist http://cutlist.at/
 
---vcodec [arg]		Videocodec für ffmpeg spezifizieren. Wenn nicht gesetzt, dann "copy".
---acodec [arg]		Audiocodec für ffmpeg spezifizieren. Wenn nicht gesetzt, dann "copy".
+--vcodec [arg]		Videocodec für ffmpeg spezifizieren. Wenn nicht gesetzt, dann "copy"
+--acodec [arg]		Audiocodec für ffmpeg spezifizieren. Wenn nicht gesetzt, dann "copy"
+
+-k, --keyframes		Keyframes neu generieren, wenn nicht darauf geschnitten ist
 
 -h, --help		Diese Hilfe ^^
+
+
+###  Features  ###
+-k, --keyframes	Keyframes können jetzt neu generiert werden, so dass es beim Schnitt nicht mehr zu fehlerhaften Übergängen kommt.
+
+-l, --local	Avidemux-Schnitte könnten als Schnittliste verwendet werden. Dafür wird das Video mit Avidemux geschnitten, aber statt des Videos wird das Projekt-Skript in dasselbe Verzeichnis gespeichert, z.B.: Video.HQ.avi -> Video.HQ.py
+
 
 ###  Original  ### 
 	Author: Daniel Siegmanski
@@ -138,6 +148,7 @@ while [ ! -z "$1" ]; do
 		--toprated )		toprated=yes ;;
 		--vcodec )			vcodec="$2"; shift;;
 		--acodec )			acodec="$2"; shift;;
+		-k | --keyframes )	keyframes=yes ;;
 		-h | --help )		help ;;
 		--version )			echo "$version"; exit 0 ;;
 	esac
@@ -145,6 +156,12 @@ while [ ! -z "$1" ]; do
 done
 
 server_name=$(echo "$server" | sed -E 's#^https?://([^/]+)/?.*#\1#')
+
+loglevel=""
+if [ $verbose == "no" ]; then
+	loglevel=" -loglevel error"
+fi
+
 
 # Diese Funktion gibt die Warnung bezüglich der Löschung von $tmp aus
 function warnung ()
@@ -400,10 +417,11 @@ film_file=$film
 
 }
 
-# In dieser Funktion wir die lokale Cutlist überprüft
+# In dieser Funktion wird die lokale Cutlist überprüft
 function local ()
 {
-local_cutlists=$(ls *.cutlist) # Variable mit allen Cutlists in $PWD
+vorhanden=no
+local_cutlists=$(ls *.cutlist 2> /dev/null) # Variable mit allen Cutlists in $PWD
 filesize=$(ls -l $film | awk '{ print $5 }') # Dateigröße des Filmes
 let goodCount=0 # Passende Cutlists
 let arraylocal=1 # Nummer des Arrays
@@ -467,8 +485,21 @@ elif [ "$goodCount" -gt 1 ]; then # Wenn mehrere Cutlists gefunden wurden
 	CUTLIST=${namelocal[$NUMBER]}
 	cp $CUTLIST $tmp
 	vorhanden=yes
-else
-	exit 1
+fi
+}
+
+# In dieser Funktion wird auf lokale Avidemux-Cutlist überprüft
+function load_py ()
+{
+
+cut_py="${film%.*}.py"
+if [ ! -f "$cut_py" ]; then
+	cut_py="{$film_ohne_ende}.py"
+fi
+
+if [ -f "$cut_py" ]; then
+	vorhanden="yes"
+	echo "Verwende $cut_py als Cutlist."
 fi
 }
 
@@ -712,7 +743,10 @@ fi
 function format ()
 {
 echo -n "Überprüfe um welches Format es sich handelt --> "
-if cat $tmp/$CUTLIST | grep "StartFrame=" >> /dev/null; then
+if [ -f "$cut_py" ]; then
+	echo -e "${blau}Avidemux Zeit${normal}"
+	format="avidemux"
+elif cat $tmp/$CUTLIST | grep "StartFrame=" >> /dev/null; then
 	echo -e "${blau}Frames${normal}"
 	format=frames
 elif cat $tmp/$CUTLIST | grep "Start=" >> /dev/null; then
@@ -755,6 +789,55 @@ else
 fi
 }
 
+# Hier wird überprüft um welchen Video-Codec es sich handelt
+function which_codec ()
+{
+
+if [ "$vcodec" != "copy" ]; then
+	filmvcodec=$vcodec
+else
+	echo -n "Überprüfe um welchen Video-Codec es sich handelt --> "
+	
+	filmvcodec=$(ffprobe "$film_file" |& grep 'Video:' | awk -v N=4 '{print $N}')
+	
+	if [ "$filmvcodec" != "" ]; then
+		echo -e "${blau}$filmvcodec${normal}"
+	else
+		echo -e "${rot}Es muss ein Fehler aufgetreten sein!${normal}"
+		if [ "$HaltByErrors" == "yes" ]; then
+			exit 1
+		else
+			continue=1
+		fi
+	fi
+fi	
+}
+
+# Hier werden die Keyframes geholt
+function get_keyframes ()
+{
+
+echo "##### Suche Keyframes #####"
+ffprobe -hide_banner$loglevel -select_streams v:0 -show_entries packet=dts_time,flags -of csv=p=0 "$film_file" | awk -F, '$2 ~ /K/ {print $1}' > "$tmp/keyframes.txt"
+
+if [ -f "$tmp/keyframes.txt" ] && [ $(ls -l $tmp/keyframes.txt | awk '{ print $5 }' | bc -l) -gt 64 ]; then
+	echo "##### Fertig #####"
+else
+	echo -e "${gelb}Es wurden keine Keyframes gefunden. Soll mit dem Standard-Schnitt fortgefahren werden? [y|n]${normal}"
+	read error_antwort
+	if [ "$error_antwort" == "y" ] || [ "$error_antwort" == "j" ]; then
+		keyframes=no
+	else
+		if [ "$HaltByErrors" == "yes" ]; then
+			exit 1
+		else
+			continue=1
+		fi
+	fi
+fi
+	
+}
+
 # Hier wir die Cutlist überprüft, auf z.B. EPGErrors, MissingEnding, MissingVideo, ...
 function cutlist_error ()
 {
@@ -787,15 +870,58 @@ done
 function demux ()
 {
 
-loglevel=""
-if [ $verbose == "yes" ]; then
-	loglevel=" -loglevel error"
-fi
-
-cut_anzahl=$(( $(grep "NoOfCuts" "$tmp/$CUTLIST" | cut -d"=" -f2 | tr -d "\r") ))
 echo "##### Anwendung der Cuts #####"
 
-if [ "$format" = "zeit" ]; then
+if [ "$format" == "avidemux" ]; then
+	let head2=1
+	while IFS= read -r line; do
+		if [[ "$line" =~ adm\.addSegment\([0-9]+,\ *([0-9]+),\ *([0-9]+)\) ]]; then
+			time_seconds_start=$(echo "scale=3; ${BASH_REMATCH[1]} / 1000000" | bc -l )
+			time_seconds_dauer=$(echo "scale=3; ${BASH_REMATCH[2]} / 1000000" | bc -l )
+			
+			echo "Startzeit: $time_seconds_start"
+			echo "Dauer: $time_seconds_dauer"
+			
+			if [ "$keyframes" == "yes" ]; then
+				time_seconds_keyframe=$(awk -v start="$(echo "scale=3; $time_seconds_start - 0.5" | bc -l )" '$1>=start {print $i;exit;}' "$tmp/keyframes.txt")
+				if [ "$time_seconds_keyframe" != "" ] && [ 1 -eq "$(echo "$time_seconds_start > 0.5" | bc)" ]; then
+					time_seconds_keyframe=$(echo "scale=3; $time_seconds_keyframe" | bc -l )
+					if [ 1 -eq "$(echo "$time_seconds_keyframe > ($time_seconds_start + 0.5)" | bc)" ]; then
+						echo "Nächster Keyframe: $time_seconds_keyframe"
+						
+						SEGFILE="$tmp/part_${head2}.${film##*.}"
+						call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -to \"$time_seconds_keyframe\" -c:v $filmvcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+						echo $call
+						eval "$call"
+						
+						time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
+						time_seconds_start=$time_seconds_keyframe
+						
+						let head2++
+					elif [ 1 -eq "$(echo "$time_seconds_keyframe > ($time_seconds_start - 0.5)" | bc)" ]; then
+						echo "Start Keyframe: $time_seconds_keyframe"
+						
+						time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
+						time_seconds_start=$time_seconds_keyframe
+					else
+						echo "Start ist Keyframe"
+					fi
+				fi
+			fi
+			
+			SEGFILE="$tmp/part_${head2}.${film##*.}"
+			call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+			echo $call
+			eval "$call"
+			
+			echo "file '$SEGFILE'" >> "$tmp/list.txt"
+			let head2++
+			echo ""
+		fi
+	done < $cut_py
+
+elif [ "$format" == "zeit" ]; then
+	cut_anzahl=$(( $(grep "NoOfCuts" "$tmp/$CUTLIST" | cut -d"=" -f2 | tr -d "\r") ))
 	let head2=1
 	echo "Es müssen $cut_anzahl Cuts umgerechnet werden"
 	while [ "$cut_anzahl" -gt 0 ]; do
@@ -807,16 +933,18 @@ if [ "$format" = "zeit" ]; then
 		echo "Dauer: $time_seconds_dauer"
 		
 		SEGFILE="$tmp/part_${head2}.${film##*.}"
-		call="ffmpeg -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+		call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
 		echo $call
 		eval "$call"
 		
 		echo "file '$SEGFILE'" >> "$tmp/list.txt"
 		let head2++
 		let cut_anzahl--
+		echo ""
 	done
 	
-elif [ "$format" = "frames" ]; then
+elif [ "$format" == "frames" ]; then
+	cut_anzahl=$(( $(grep "NoOfCuts" "$tmp/$CUTLIST" | cut -d"=" -f2 | tr -d "\r") ))
 	let head2=1
 	echo "Es müssen $cut_anzahl Cuts umgerechnet werden"
 	while [ $cut_anzahl -gt 0 ]; do
@@ -830,13 +958,14 @@ elif [ "$format" = "frames" ]; then
 		echo "Dauer: $dauerframe"
 		
 		SEGFILE="$tmp/part_${head2}.${film##*.}"
-		call="ffmpeg -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+		call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
 		echo $call
 		eval "$call"
 		
 		echo "file '$SEGFILE'" >> "$tmp/list.txt"
 		let head2++
 		let cut_anzahl--
+		echo ""
 	done
 fi
 
@@ -984,6 +1113,9 @@ software
 		which_fps
 		if [ "$UseLocalCutlist" == "yes" ]; then
 			local
+			if [ "$vorhanden" == "no" ]; then
+				load_py
+			fi
 		fi
 		while true; do
 			if [ "$UseLocalCutlist" == "no" ] || [ "$vorhanden" == "no" ] && [ "$continue" == "0" ]; then
@@ -992,7 +1124,11 @@ software
 			if [ "$continue" == "0" ]; then
 				format
 			fi
-			if [ "$continue" == "0" ]; then
+			if [ "$keyframes" == "yes" ] && [ "$continue" == "0" ]; then
+				which_codec
+				get_keyframes
+			fi
+			if [ "$format" != "avidemux" ] && [ "$continue" == "0" ]; then
 				cutlist_error
 			fi
 			if [ "$error_found" == "1" ] && [ "$toprated" == "no" ]; then

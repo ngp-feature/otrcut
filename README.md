@@ -43,7 +43,15 @@ Optionen:
 
 --acodec [arg]		Audiocodec für ffmpeg spezifizieren. Wenn nicht gesetzt, dann "copy".
 
+-k, --keyframes		Keyframes neu generieren, wenn nicht darauf geschnitten ist
+
+
 -h, --help		Diese Hilfe ^^
+
+###  Features  ###
+	-k, --keyframes	Keyframes können jetzt neu generiert werden, so dass es beim Schnitt nicht mehr zu fehlerhaften Übergängen kommt.
+
+	-l, --local	Avidemux-Schnitte könnten als Schnittliste verwendet werden. Dafür wird das Video mit Avidemux geschnitten, aber statt des Videos wird das Projekt-Skript in dasselbe Verzeichnis gespeichert, z.B.: Video.HQ.avi -> Video.HQ.py
 
 ###  Original  ### 
 	Author: Daniel Siegmanski
