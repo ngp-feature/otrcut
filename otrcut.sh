@@ -8,7 +8,7 @@
 # Original Author: Daniel Siegmanski
 
 # Hier werden verschiedene Variablen definiert.
-version=20251024	# Die Version von OtrCut, Format: yyyymmdd, yyyy=Jahr mm=Monat dd=Tag
+version=20251127	# Die Version von OtrCut, Format: yyyymmdd, yyyy=Jahr mm=Monat dd=Tag
 LocalCutlistOkay=no	# Ist die lokale Cutlist vorhanden?
 input=""			# Eingabedatei/en
 LocalCutlistName=""	# Name der lokalen Cutlist
@@ -866,6 +866,38 @@ done
 }
 
 
+# Suche nach Keyframe
+function sucheKeyframe ()
+{
+	if [ "$keyframes" == "yes" ]; then
+		time_seconds_keyframe=$(awk -v start="$(echo "scale=3; $time_seconds_start - 0.5" | bc -l )" '$1>=start {print $i;exit;}' "$tmp/keyframes.txt")
+		if [ "$time_seconds_keyframe" != "" ] && [ 1 -eq "$(echo "$time_seconds_start > 0.5" | bc)" ]; then
+			time_seconds_keyframe=$(echo "scale=3; $time_seconds_keyframe" | bc -l )
+			if [ 1 -eq "$(echo "$time_seconds_keyframe > ($time_seconds_start + 0.5)" | bc)" ]; then
+				echo "Nächster Keyframe: $time_seconds_keyframe"
+				
+				SEGFILE="$tmp/part_${head2}.${film##*.}"
+				call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -to \"$time_seconds_keyframe\" -c:v $filmvcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+				echo $call
+				eval "$call"
+				
+				time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
+				time_seconds_start=$time_seconds_keyframe
+				
+				let head2++
+			elif [ 1 -eq "$(echo "$time_seconds_keyframe > ($time_seconds_start - 0.5)" | bc)" ]; then
+				echo "Start Keyframe: $time_seconds_keyframe"
+				
+				time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
+				time_seconds_start=$time_seconds_keyframe
+			else
+				echo "Start ist Keyframe"
+			fi
+		fi
+	fi
+}
+
+
 # Hier wird nun ffmpeg gestartet
 function demux ()
 {
@@ -882,32 +914,7 @@ if [ "$format" == "avidemux" ]; then
 			echo "Startzeit: $time_seconds_start"
 			echo "Dauer: $time_seconds_dauer"
 			
-			if [ "$keyframes" == "yes" ]; then
-				time_seconds_keyframe=$(awk -v start="$(echo "scale=3; $time_seconds_start - 0.5" | bc -l )" '$1>=start {print $i;exit;}' "$tmp/keyframes.txt")
-				if [ "$time_seconds_keyframe" != "" ] && [ 1 -eq "$(echo "$time_seconds_start > 0.5" | bc)" ]; then
-					time_seconds_keyframe=$(echo "scale=3; $time_seconds_keyframe" | bc -l )
-					if [ 1 -eq "$(echo "$time_seconds_keyframe > ($time_seconds_start + 0.5)" | bc)" ]; then
-						echo "Nächster Keyframe: $time_seconds_keyframe"
-						
-						SEGFILE="$tmp/part_${head2}.${film##*.}"
-						call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -to \"$time_seconds_keyframe\" -c:v $filmvcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
-						echo $call
-						eval "$call"
-						
-						time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
-						time_seconds_start=$time_seconds_keyframe
-						
-						let head2++
-					elif [ 1 -eq "$(echo "$time_seconds_keyframe > ($time_seconds_start - 0.5)" | bc)" ]; then
-						echo "Start Keyframe: $time_seconds_keyframe"
-						
-						time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
-						time_seconds_start=$time_seconds_keyframe
-					else
-						echo "Start ist Keyframe"
-					fi
-				fi
-			fi
+			sucheKeyframe
 			
 			SEGFILE="$tmp/part_${head2}.${film##*.}"
 			call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
@@ -926,11 +933,12 @@ elif [ "$format" == "zeit" ]; then
 	echo "Es müssen $cut_anzahl Cuts umgerechnet werden"
 	while [ "$cut_anzahl" -gt 0 ]; do
 		let time_seconds_start=$(cat $tmp/$CUTLIST | grep "Start=" | cut -d= -f2 | head -n$head2 | tail -n1 | cut -d"." -f1 | tr -d "\r")
-		echo "Startzeit: $time_seconds_start"
-		
 		let time_seconds_dauer=$(cat  $tmp/$CUTLIST | grep "Duration=" | cut -d= -f2 | head -n$head2 | tail -n1 | cut -d"." -f1 | tr -d "\r")
 		
+		echo "Startzeit: $time_seconds_start"
 		echo "Dauer: $time_seconds_dauer"
+		
+		sucheKeyframe
 		
 		SEGFILE="$tmp/part_${head2}.${film##*.}"
 		call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
@@ -949,13 +957,14 @@ elif [ "$format" == "frames" ]; then
 	echo "Es müssen $cut_anzahl Cuts umgerechnet werden"
 	while [ $cut_anzahl -gt 0 ]; do
 		let startframe=$(cat $tmp/$CUTLIST | grep "StartFrame=" | cut -d= -f2 | head -n$head2 | tail -n1 | tr -d "\r")
-		echo "Startframe: $startframe"
-		
 		let dauerframe=$(cat $tmp/$CUTLIST | grep "DurationFrames=" | cut -d= -f2 | head -n$head2 | tail -n1 | tr -d "\r")
 		time_seconds_start=$(echo "scale=3; $startframe / $fps" | bc -l )
 		time_seconds_dauer=$(echo "scale=3; $dauerframe / $fps" | bc -l )
 		
+		echo "Startframe: $startframe"
 		echo "Dauer: $dauerframe"
+		
+		sucheKeyframe
 		
 		SEGFILE="$tmp/part_${head2}.${film##*.}"
 		call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
