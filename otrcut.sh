@@ -40,12 +40,14 @@ acodec=copy			# Input-Audio nur kopieren
 keyframes=no		# Keyframes neu generieren, wenn nicht darauf geschnitten ist
 copy=no				# Wenn $toprated=yes, und keine Cutlist gefunden wird, $film nach $output kopieren
 move=no				# Wenn $toprated=yes, und keine Cutlist gefunden wird, $film nach $output verschieben
+decoder=""			# Pfad/Name des Decoders. Leer = automatische Suche (otrtool, dann otrdecoder).
+					# Wird hier oder in der Config etwas gesetzt, hat das Vorrang, z.B. /home/benutzer/bin/otrdecoder
+decoder_type=""		# Wird automatisch bestimmt: "otrtool" oder "otrdecoder" (steuert die Aufruf-Parameter)
 
 # Diese Variablen werden vom Benutzer gesetzt.
 # Sie sind für die Verwendung des Decoders gedacht.
 email=""			# Die EMail-Adresse mit der Sie bei OTR registriert sind
 password=""			# Das Passwort mit dem Sie sich bei OTR einloggen
-decoder="otrdecoder" # Pfad zum decoder, z.B. /home/benutzer/bin/otrdecoder
 
 
 scriptpath=$( realpath "$0" | sed 's|\(.*\)/.*|\1|' )
@@ -202,7 +204,7 @@ fi
 }
 
 # Diese Funktion überprüft verschiedene Einstellungen
-function test ()
+function check_settings ()
 {
 # Prüfen ob die Angabe einen absoluten Pfad hat
 if echo $i | grep -v '^/' > /dev/null; then
@@ -215,13 +217,13 @@ if echo $i | grep -v '^/' > /dev/null; then
 fi
 
 # Hier wird überprüft ob eine Eingabedatei angegeben ist
-if [ -z $i ]; then
+if [ -z "$i" ]; then
 	echo "${rot}Es wurde keine Eingabedatei angegeben!${normal}"
 	exit 1
 else
 	# Überprüfe ob angegebene Datei existiert
 	for f in $i; do
-		if [ ! -f $f ]; then
+		if [ ! -f "$f" ]; then
 			echo -e "${rot}Eingabedatei nicht gefunden!${normal}"
 			exit 1
 		fi
@@ -252,7 +254,7 @@ else
 		echo -e "${rot}Sie haben keine Schreibrechte in $output.${normal}"
 		exit 1
 	else
-		echo -e "${gelb}Das Verzeichnis $output wurde nicht gefunden, soll er erstellt werden? [y|n]${normal}"
+		echo -e "${gelb}Das Verzeichnis $output wurde nicht gefunden, soll es erstellt werden? [y|n]${normal}"
 		read OUTPUT
 		while [ "$OUTPUT" == "" ] || [ ! "$OUTPUT" == "y" ] && [ ! "$OUTPUT" == "n" ]; do # Bei falscher Eingabe
 			echo -e "${gelb}Falsche Eingabe, bitte nochmal:${normal}"
@@ -263,7 +265,7 @@ else
 			exit 1
 		elif [ "$OUTPUT" == "y" ]; then # Wenn der Benutzer ja "sagt"
 			echo -n "Erstelle Ordner $output -->"
-			mkdir $output
+			mkdir "$output"
 			if [ -d "$output" ]; then
 				echo -e "${gruen}okay${normal}"
 			else
@@ -284,7 +286,7 @@ if [ "$tmp" == "/tmp/otrcut" ]; then
 			mkdir "/tmp/otrcut"
 			echo "Verwende $tmp als Ausgabeordner"
 		else
-			echo -e "${rot}Sie haben keine Schreibrechte in /tmp/ ${end}"
+			echo -e "${rot}Sie haben keine Schreibrechte in /tmp/ ${normal}"
 			exit 1
 		fi
 	fi
@@ -294,12 +296,12 @@ else
 		echo "Verwende $tmp/otrcut als Ausgabeordner."
 		tmp="$tmp/otrcut"
 	elif [ -d "$tmp" ] && [ ! -w "$tmp" ]; then
-		echo -e "${rot}Sie haben keine Schreibrechte in $tmp!${end}"
+		echo -e "${rot}Sie haben keine Schreibrechte in $tmp!${normal}"
 	else
-		echo -e "${gelb}$tmp wurde nicht gefunden, soll er erstellt werden? [y|n]${end}"
+		echo -e "${gelb}$tmp wurde nicht gefunden, soll er erstellt werden? [y|n]${normal}"
 		read TMP # Lesen der Benutzereingabe nach $TMP
 		while [ "$TMP" == "" ] || [ ! "$TMP" == "y" ] && [ ! "$TMP" == "n" ]; do # Bei falscher Eingabe	
-			echo -e "${gelb}Falsche Eingabe, bitte nochmal:${end}" 
+			echo -e "${gelb}Falsche Eingabe, bitte nochmal:${normal}" 
 			read TMP # Lesen der Benutzereingabe nach $TMP
 		done
 		if [ $TMP == n ]; then # Wenn der Benutzer nein "sagt"
@@ -309,10 +311,10 @@ else
 			echo -n "Erstelle Ordner $tmp --> "
 			mkdir "$tmp/otrcut"
 			if [ -d $tmp/otrcut ]; then
-				echo -e "${gruen}okay${end}"
+				echo -e "${gruen}okay${normal}"
 				tmp="$tmp/otrcut"
 			else
-				echo -e "${rot}false${end}"
+				echo -e "${rot}false${normal}"
 				exit 1
 			fi
 		fi
@@ -320,38 +322,52 @@ else
 fi
 }
 
-# Diese Funktion überprüft ob ffmpeg installiert ist
+# Diese Funktion sucht dynamisch nach einem otrkey-Decoder.
+# Reihenfolge: ein explizit gesetzter $decoder (Config) hat Vorrang,
+# danach wird otrtool bevorzugt und otrdecoder als Fallback verwendet.
+# Der Typ ($decoder_type) bestimmt später die Aufruf-Parameter in decode().
+function detect_decoder ()
+{
+	if [ -n "$decoder" ] && command -v "$decoder" >> /dev/null 2>&1; then
+		: # Vom Benutzer gesetzter Decoder wird verwendet.
+	elif command -v otrtool >> /dev/null 2>&1; then
+		decoder="otrtool"
+	elif command -v otrdecoder >> /dev/null 2>&1; then
+		decoder="otrdecoder"
+	else
+		decoder=""
+	fi
+
+	# Typ anhand des Programmnamens bestimmen.
+	case "${decoder##*/}" in
+		otrtool* )	decoder_type="otrtool" ;;
+		* )			decoder_type="otrdecoder" ;;
+	esac
+}
+
+# Diese Funktion überprüft ob ffmpeg installiert ist und sucht den Decoder
 function software ()
 {
 echo -n "Überprüfe ob ffmpeg installiert ist --> "
-if type -t ffmpeg >> /dev/null; then
+if command -v ffmpeg >> /dev/null 2>&1; then
 	echo -e "${gruen}okay${normal}"
 	CutProg="ffmpeg"
 else
 	echo -e "${rot}false${normal}"
 fi
-if [ -z $CutProg ]; then
+if [ -z "$CutProg" ]; then
 	echo -e "${rot}Bitte installieren sie ffmpeg${normal}"
 	exit 1
 fi
 
-# Hier wird überprüft ob der richtige Pfad zum Decoder angegeben wurde
-if [ "$decoded" == "yes" ]; then
-	echo -n "Überprüfe ob der Decoder-Pfad richtig gesetzt wurde --> "
-	if $decoder -v >> /dev/null; then
-		echo -e "${gruen}okay${normal}"
-	else
-		echo -e "${rot}false${normal}"
-		exit 1
-	fi
-	if [ "$email" == "" ]; then
-		echo -e "${rot}E-Mail-Adresse wurde nicht gesetzt.${normal}"
-		exit 1
-	fi
-	if [ "$password" == "" ]; then
-		echo -e "${rot}Passwort wurde nicht gesetzt.${normal}"
-		exit 1
-	fi
+# Decoder dynamisch suchen (nur für .otrkey-Dateien nötig)
+detect_decoder
+echo -n "Suche nach einem otrkey-Decoder --> "
+if [ -n "$decoder" ]; then
+	echo -e "${gruen}$decoder ($decoder_type)${normal}"
+else
+	echo -e "${gelb}keiner gefunden${normal}"
+	echo -e "${gelb}Hinweis: .otrkey-Dateien können ohne otrtool oder otrdecoder nicht dekodiert werden.${normal}"
 fi
 }
 
@@ -418,11 +434,11 @@ film_file=$film
 }
 
 # In dieser Funktion wird die lokale Cutlist überprüft
-function local ()
+function load_local ()
 {
 vorhanden=no
 local_cutlists=$(ls *.cutlist 2> /dev/null) # Variable mit allen Cutlists in $PWD
-filesize=$(ls -l $film | awk '{ print $5 }') # Dateigröße des Filmes
+filesize=$(ls -l "$film" | awk '{ print $5 }') # Dateigröße des Filmes
 let goodCount=0 # Passende Cutlists
 let arraylocal=1 # Nummer des Arrays
 for f in $local_cutlists; do
@@ -466,7 +482,7 @@ done
 if [ "$goodCount" -eq 1 ]; then # Wenn nur eine Cutlist gefunden wurde
 	echo "Es wurde eine passende Cutlist gefunden. Diese wird nun verwendet."
 	CUTLIST="$f"
-	cp $CUTLIST $tmp
+	cp "$CUTLIST" "$tmp"
 elif [ "$goodCount" -gt 1 ]; then # Wenn mehrere Cutlists gefunden wurden
 	echo "Es wurden $goodCount Cutlists gefunden. Bitte wählen Sie aus:"
 	echo ""
@@ -483,7 +499,7 @@ elif [ "$goodCount" -gt 1 ]; then # Wenn mehrere Cutlists gefunden wurden
 	done
 	echo "Verwende ${namelocal[$NUMBER]} als Cutlist."
 	CUTLIST=${namelocal[$NUMBER]}
-	cp $CUTLIST $tmp
+	cp "$CUTLIST" "$tmp"
 	vorhanden=yes
 fi
 }
@@ -491,16 +507,19 @@ fi
 # In dieser Funktion wird auf lokale Avidemux-Cutlist überprüft
 function load_py ()
 {
-
-cut_py="${film%.*}.py"
-if [ ! -f "$cut_py" ]; then
-	cut_py="{$film_ohne_ende}.py"
-fi
-
-if [ -f "$cut_py" ]; then
-	vorhanden="yes"
-	echo "Verwende $cut_py als Cutlist."
-fi
+vorhanden=no
+# Avidemux speichert das Projekt-Skript je nach Version unterschiedlich, z.B. für
+# xyz.mpg.HQ.avi:
+#   xyz.mpg.HQ.py  -> nur die letzte Endung ersetzt (altes Verhalten)
+#   xyz.mpg.py     -> nach .mpg abgeschnitten (neuere Avidemux-Versionen)
+#   xyz.py         -> ganz ohne Aufnahme-Endung
+for cut_py in "${film%.*}.py" "${film_ohne_ende}.mpg.py" "${film_ohne_ende}.py"; do
+	if [ -f "$cut_py" ]; then
+		vorhanden="yes"
+		echo "Verwende $cut_py als Cutlist."
+		break
+	fi
+done
 }
 
 # In dieser Funktion wird versucht eine Cutlist aus den Internet zu laden
@@ -509,10 +528,10 @@ function load ()
 # In dieser Funktion wird geprüft, ob die Cutlist okay ist
 function test_cutlist ()
 {
-let cutlist_size=$(ls -l $tmp/$CUTLIST | awk '{ print $5 }')
+let cutlist_size=$(ls -l "$tmp/$CUTLIST" | awk '{ print $5 }')
 if [ "$cutlist_size" -lt "100" ]; then
 	cutlist_okay=no
-	rm -rf $TMP/$CUTLIST
+	rm -rf "$tmp/$CUTLIST"
 else
 	cutlist_okay=yes
 fi
@@ -523,7 +542,7 @@ sleep 1
 
 echo -n "Führe Suchanfrage bei $server_name durch ---> "
 
-wget -q -O $tmp/search.xml "${server}getxml.php?version=0.9.8&name=$search_name"
+wget -q -O "$tmp/search.xml" "${server}getxml.php?version=0.9.8&name=$search_name"
 
 if grep -q '<id>' "$tmp/search.xml"; then
 	echo -e "${gruen}okay${normal}"
@@ -553,14 +572,14 @@ if [ "$continue" == "1" ]; then
 			echo "Datei wird nicht kopiert."
 		elif [ "$COPY" == "y" ]; then # Wenn der Benutzer ja "sagt"
 			echo "Datei wird in den Ausgabeordner kopiert."
-			cp $tmp/$film $output/
+			cp "$tmp/$film" "$output/"
 		fi
 	elif [ "$copy" == "yes" ]; then
 		echo "Datei wird in den Ausgabeordner kopiert."
-		cp $tmp/$film $output/
+		cp "$tmp/$film" "$output/"
 	elif [ "$move" == "yes" ]; then
 		echo "Datei wird in den Ausgabeordner verschoben."
-		mv $tmp/$film $output/
+		mv "$tmp/$film" "$output/"
 	fi
 else
 	if [ "$schon_mal_angezeigt" == "" ]; then
@@ -574,28 +593,31 @@ else
 	let cutlist_anzahl
 	if [ "$cutlist_anzahl" -ge "1" ] && [ "$continue" == "0" ]; then # Wenn mehrere Cutlists gefunden wurden
 		echo ""
+		_extract_field () { grep "<$1>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tr -d "\r"; }
+		mapfile -t f_name           < <(_extract_field name)
+		mapfile -t f_author         < <(_extract_field author)
+		mapfile -t f_ratingbyauthor < <(_extract_field ratingbyauthor)
+		mapfile -t f_rating         < <(_extract_field rating)
+		mapfile -t f_comment        < <(_extract_field usercomment)
+		mapfile -t f_id             < <(_extract_field id)
+		mapfile -t f_ratingcount    < <(_extract_field ratingcount)
+		mapfile -t f_withtime       < <(_extract_field withtime)
+		mapfile -t f_withframes     < <(_extract_field withframes)
+		mapfile -t f_filename       < <(_extract_field filename)
+		field_total=${#f_name[@]}
 		let tail=1
 		while [ "$cutlist_anzahl" -gt "0" ]; do
-			# Name der Cutlist
-			name[$array]=$(grep "<name>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Author der Cutlist
-			author[$array]=$(grep "<author>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Bewertung des Authors
-			ratingbyauthor[$array]=$(grep "<ratingbyauthor>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Bewertung der User
-			rating[$array]=$(grep "<rating>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Kommentar des Authors
-			comment[$array]=$(grep "<usercomment>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# ID der Cutlist
-			ID[$array]=$(grep "<id>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Anzahl der Bewertungen
-			ratingcount[$array]=$(grep "<ratingcount>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Cutangaben in Sekunden
-			cutinseconds[$array]=$(grep "<withtime>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Cutangaben in Frames (besser)
-			cutinframes[$array]=$(grep "<withframes>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
-			# Filename der Cutlist
-			filename[$array]=$(grep "<filename>" "$tmp/search.xml" | cut -d">" -f2 | cut -d"<" -f1 | tail -n$tail | head -n1 | tr -d "\r")
+			idx=$(( field_total - tail ))
+			name[$array]=${f_name[idx]}
+			author[$array]=${f_author[idx]}
+			ratingbyauthor[$array]=${f_ratingbyauthor[idx]}
+			rating[$array]=${f_rating[idx]}
+			comment[$array]=${f_comment[idx]}
+			ID[$array]=${f_id[idx]}
+			ratingcount[$array]=${f_ratingcount[idx]}
+			cutinseconds[$array]=${f_withtime[idx]}
+			cutinframes[$array]=${f_withframes[idx]}
+			filename[$array]=${f_filename[idx]}
 
 			if [ "$toprated" == "no" ]; then # Wenn --toprated nicht gesetzt ist
 				if echo $cutlistWithError | grep -q "${ID[$array]}"; then # Wenn Fehler gesetzt ist z.B. EPG-Error oder MissingBeginning
@@ -722,7 +744,7 @@ fi
 if [ "$continue" == "0" ]; then
 	echo -n "Lade $CUTLIST -->"
 	
-	wget -q -O $tmp/$CUTLIST "${server}getfile.php?id=$id"
+	wget -q -O "$tmp/$CUTLIST" "${server}getfile.php?id=$id"
 	test_cutlist # Testen der Cutlist
 	if [ -f "$tmp/$CUTLIST" ] && [ "$cutlist_okay" == "yes" ]; then
 		echo -e "${gruen}okay${normal}"
@@ -820,7 +842,7 @@ function get_keyframes ()
 echo "##### Suche Keyframes #####"
 ffprobe -hide_banner$loglevel -select_streams v:0 -show_entries packet=dts_time,flags -of csv=p=0 "$film_file" | awk -F, '$2 ~ /K/ {print $1}' > "$tmp/keyframes.txt"
 
-if [ -f "$tmp/keyframes.txt" ] && [ $(ls -l $tmp/keyframes.txt | awk '{ print $5 }' | bc -l) -gt 64 ]; then
+if [ -f "$tmp/keyframes.txt" ] && [ $(ls -l "$tmp/keyframes.txt" | awk '{ print $5 }' | bc -l) -gt 64 ]; then
 	echo "##### Fertig #####"
 else
 	echo -e "${gelb}Es wurden keine Keyframes gefunden. Soll mit dem Standard-Schnitt fortgefahren werden? [y|n]${normal}"
@@ -856,7 +878,7 @@ for e in $errors; do
 		if [ "$error_yes" == "EPGError" ]; then
 			epgerror=$(cat $tmp/$CUTLIST | grep "ActualContent")
 			epgerror=${epgerror##*=}
-			echo -e "${rot}ActualContent: $epgerror${end}"
+			echo -e "${rot}ActualContent: $epgerror${normal}"
 		fi
 		error_found=1
 		cutlistWithError="${cutlistWithError} $id_downloaded"
@@ -877,9 +899,11 @@ function sucheKeyframe ()
 				echo "Nächster Keyframe: $time_seconds_keyframe"
 				
 				SEGFILE="$tmp/part_${head2}.${film##*.}"
-				call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -to \"$time_seconds_keyframe\" -c:v $filmvcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+				call="ffmpeg -nostdin -hide_banner$loglevel -fflags +genpts -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -to \"$time_seconds_keyframe\" -c:v $filmvcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
 				echo $call
 				eval "$call"
+				
+				echo "file '$SEGFILE'" >> "$tmp/list.txt"
 				
 				time_seconds_dauer=$(echo "scale=3; $time_seconds_dauer - $time_seconds_keyframe + $time_seconds_start" | bc -l )
 				time_seconds_start=$time_seconds_keyframe
@@ -905,35 +929,20 @@ function demux ()
 echo "##### Anwendung der Cuts #####"
 
 if [ "$format" == "avidemux" ]; then
-	let head2=1
+	# Avidemux-Segmente einlesen und nach Startzeit sortieren
+	# (die Reihenfolge in der Projektdatei ist nicht zwingend chronologisch).
+	cut_starts_us=(); cut_durs_us=()
 	while IFS= read -r line; do
 		if [[ "$line" =~ adm\.addSegment\([0-9]+,\ *([0-9]+),\ *([0-9]+)\) ]]; then
-			time_seconds_start=$(echo "scale=3; ${BASH_REMATCH[1]} / 1000000" | bc -l )
-			time_seconds_dauer=$(echo "scale=3; ${BASH_REMATCH[2]} / 1000000" | bc -l )
-			
-			echo "Startzeit: $time_seconds_start"
-			echo "Dauer: $time_seconds_dauer"
-			
-			sucheKeyframe
-			
-			SEGFILE="$tmp/part_${head2}.${film##*.}"
-			call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
-			echo $call
-			eval "$call"
-			
-			echo "file '$SEGFILE'" >> "$tmp/list.txt"
-			let head2++
-			echo ""
+			cut_starts_us+=("${BASH_REMATCH[1]}")
+			cut_durs_us+=("${BASH_REMATCH[2]}")
 		fi
-	done < $cut_py
-
-elif [ "$format" == "zeit" ]; then
-	cut_anzahl=$(( $(grep "NoOfCuts" "$tmp/$CUTLIST" | cut -d"=" -f2 | tr -d "\r") ))
+	done < "$cut_py"
+	mapfile -t cut_order < <(for k in "${!cut_starts_us[@]}"; do echo "${cut_starts_us[k]:-0} $k"; done | sort -s -n -k1,1 | awk '{print $2}')
 	let head2=1
-	echo "Es müssen $cut_anzahl Cuts umgerechnet werden"
-	while [ "$cut_anzahl" -gt 0 ]; do
-		let time_seconds_start=$(cat $tmp/$CUTLIST | grep "Start=" | cut -d= -f2 | head -n$head2 | tail -n1 | cut -d"." -f1 | tr -d "\r")
-		let time_seconds_dauer=$(cat  $tmp/$CUTLIST | grep "Duration=" | cut -d= -f2 | head -n$head2 | tail -n1 | cut -d"." -f1 | tr -d "\r")
+	for k in "${cut_order[@]}"; do
+		time_seconds_start=$(echo "scale=3; ${cut_starts_us[k]} / 1000000" | bc -l )
+		time_seconds_dauer=$(echo "scale=3; ${cut_durs_us[k]} / 1000000" | bc -l )
 		
 		echo "Startzeit: $time_seconds_start"
 		echo "Dauer: $time_seconds_dauer"
@@ -941,23 +950,54 @@ elif [ "$format" == "zeit" ]; then
 		sucheKeyframe
 		
 		SEGFILE="$tmp/part_${head2}.${film##*.}"
-		call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
-		echo $call
+		call="ffmpeg -nostdin -hide_banner$loglevel -fflags +genpts -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+		echo "$call"
 		eval "$call"
 		
 		echo "file '$SEGFILE'" >> "$tmp/list.txt"
 		let head2++
-		let cut_anzahl--
 		echo ""
 	done
-	
+
+elif [ "$format" == "zeit" ]; then
+	cut_anzahl=$(( $(grep "NoOfCuts" "$tmp/$CUTLIST" | cut -d"=" -f2 | tr -d "\r") ))
+	echo "Es muessen $cut_anzahl Cuts umgerechnet werden"
+	# Start/Dauer in Dateireihenfolge einlesen und gemeinsam nach Startzeit sortieren.
+	mapfile -t cut_starts < <(grep "Start=" "$tmp/$CUTLIST" | cut -d= -f2 | cut -d"." -f1 | tr -d "\r")
+	mapfile -t cut_durs   < <(grep "Duration=" "$tmp/$CUTLIST" | cut -d= -f2 | cut -d"." -f1 | tr -d "\r")
+	mapfile -t cut_order  < <(for k in "${!cut_starts[@]}"; do echo "${cut_starts[k]:-0} $k"; done | sort -s -n -k1,1 | awk '{print $2}')
+	let head2=1
+	for k in "${cut_order[@]}"; do
+		time_seconds_start=${cut_starts[k]}
+		time_seconds_dauer=${cut_durs[k]}
+		
+		echo "Startzeit: $time_seconds_start"
+		echo "Dauer: $time_seconds_dauer"
+		
+		sucheKeyframe
+		
+		SEGFILE="$tmp/part_${head2}.${film##*.}"
+		call="ffmpeg -nostdin -hide_banner$loglevel -fflags +genpts -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+		echo "$call"
+		eval "$call"
+		
+		echo "file '$SEGFILE'" >> "$tmp/list.txt"
+		let head2++
+		echo ""
+	done
+
 elif [ "$format" == "frames" ]; then
 	cut_anzahl=$(( $(grep "NoOfCuts" "$tmp/$CUTLIST" | cut -d"=" -f2 | tr -d "\r") ))
+	echo "Es muessen $cut_anzahl Cuts umgerechnet werden"
+	# StartFrame/DurationFrames einlesen und gemeinsam nach Startframe sortieren.
+	mapfile -t cut_sframes < <(grep "StartFrame=" "$tmp/$CUTLIST" | cut -d= -f2 | tr -d "\r")
+	mapfile -t cut_dframes < <(grep "DurationFrames=" "$tmp/$CUTLIST" | cut -d= -f2 | tr -d "\r")
+	mapfile -t cut_order   < <(for k in "${!cut_sframes[@]}"; do echo "${cut_sframes[k]:-0} $k"; done | sort -s -n -k1,1 | awk '{print $2}')
 	let head2=1
-	echo "Es müssen $cut_anzahl Cuts umgerechnet werden"
-	while [ $cut_anzahl -gt 0 ]; do
-		let startframe=$(cat $tmp/$CUTLIST | grep "StartFrame=" | cut -d= -f2 | head -n$head2 | tail -n1 | tr -d "\r")
-		let dauerframe=$(cat $tmp/$CUTLIST | grep "DurationFrames=" | cut -d= -f2 | head -n$head2 | tail -n1 | tr -d "\r")
+	for k in "${cut_order[@]}"; do
+		startframe=${cut_sframes[k]}
+		dauerframe=${cut_dframes[k]}
+		
 		time_seconds_start=$(echo "scale=3; $startframe / $fps" | bc -l )
 		time_seconds_dauer=$(echo "scale=3; $dauerframe / $fps" | bc -l )
 		
@@ -967,13 +1007,12 @@ elif [ "$format" == "frames" ]; then
 		sucheKeyframe
 		
 		SEGFILE="$tmp/part_${head2}.${film##*.}"
-		call="ffmpeg -nostdin -hide_banner$loglevel -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
-		echo $call
+		call="ffmpeg -nostdin -hide_banner$loglevel -fflags +genpts -accurate_seek -i \"$film_file\" -ss \"$time_seconds_start\" -t \"$time_seconds_dauer\" -c:v $vcodec -c:a $acodec -avoid_negative_ts 1 \"$SEGFILE\""
+		echo "$call"
 		eval "$call"
 		
 		echo "file '$SEGFILE'" >> "$tmp/list.txt"
 		let head2++
-		let cut_anzahl--
 		echo ""
 	done
 fi
@@ -984,18 +1023,18 @@ sleep 1
 
 echo "Übergebe die Cuts nun an ffmpeg"
 
-ffmpeg -y -hide_banner$loglevel -f concat -safe 0 -i "$tmp/list.txt" -c copy "$outputfile"
+ffmpeg -y -hide_banner$loglevel -fflags +genpts -f concat -safe 0 -i "$tmp/list.txt" -c copy "$outputfile"
 
 
-if [ -f "$outputfile" ] && [ $(ls -l $outputfile | awk '{ print $5 }' | bc -l) -gt 10485760 ]; then
+if [ -f "$outputfile" ] && [ $(ls -l "$outputfile" | awk '{ print $5 }' | bc -l) -gt 10485760 ]; then
 	echo -n -e  ${gruen}$outputfile${normal}
 		echo -e "${gruen} wurde erstellt${normal}"
 	if [ "$delete" == "yes" ]; then
 		echo "Lösche Quellvideo."
-		if [ $decoded == "yes" ]; then
-			rm -rf $tmp/$film
+		if [ "$decoded" == "yes" ]; then
+			rm -rf "$tmp/$film"
 		else
-			rm -rf $film
+			rm -rf "$film"
 		fi
 	fi
 	del_tmp
@@ -1037,7 +1076,7 @@ if [ "$note" == "" ]; then
 else
 	echo -n "Übermittle Bewertung für $CUTLIST -->"
 	
-	wget -q -O $tmp/rate.php "{$server}rate.php?rate=$id&rating=$note&userid=$user&version=0.9.8.7"
+	wget -q -O "$tmp/rate.php" "${server}rate.php?rate=$id&rating=$note&userid=$user&version=0.9.8.7"
 	
 	sleep 1
 	if [ -f "$tmp/rate.php" ]; then
@@ -1076,8 +1115,19 @@ if echo $i | grep -q .otrkey; then
 			email_checked=yes
 		fi
 	fi
-	echo "Decodiere Datei --> "
-	$decoder -e $email -p $password -q -f -i $i -o "$tmp"
+	if [ -z "$decoder" ]; then
+		echo -e "${rot}Kein Decoder gefunden – \"$i\" kann nicht dekodiert werden.${normal}"
+		echo -e "${rot}Bitte otrtool oder otrdecoder installieren.${normal}"
+		exit 1
+	fi
+	echo "Decodiere Datei mit $decoder_type --> "
+	if [ "$decoder_type" == "otrtool" ]; then
+		# otrtool: -x dekodieren, -D Zielordner, otrkey als Positionsargument
+		"$decoder" -x -e "$email" -p "$password" -D "$tmp" "$i"
+	else
+		# otrdecoder: -i Input, -o Zielordner
+		"$decoder" -e "$email" -p "$password" -q -f -i "$i" -o "$tmp"
+	fi
 	otrkey=$i
 	decoded=yes
 	
@@ -1092,7 +1142,7 @@ else
 fi
 if [ "$delete" == "yes" ]; then
 	echo "Lösche OtrKey"
-	rm -rf $otrkey
+	rm -rf "$otrkey"
 fi
 }
 
@@ -1105,7 +1155,7 @@ if [ "$tmp" == "" ] || [ "$tmp" == "/" ] || [ "$tmp" == "/home" ]; then
 fi
 echo "Lösche temporäre Dateien"
 #echo $tmp
-rm -rf $tmp/*
+rm -rf "$tmp"/*
 }
 
 
@@ -1115,13 +1165,13 @@ fi
 
 software
 	for i in $input; do
-		test
+		check_settings
 		del_tmp
 		name
 		decode
 		which_fps
 		if [ "$UseLocalCutlist" == "yes" ]; then
-			local
+			load_local
 			if [ "$vorhanden" == "no" ]; then
 				load_py
 			fi
