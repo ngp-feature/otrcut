@@ -8,7 +8,7 @@
 # Original Author: Daniel Siegmanski
 
 # Hier werden verschiedene Variablen definiert.
-version=20251127	# Die Version von OtrCut, Format: yyyymmdd, yyyy=Jahr mm=Monat dd=Tag
+version=20260905	# Die Version von OtrCut, Format: yyyymmdd, yyyy=Jahr mm=Monat dd=Tag
 LocalCutlistOkay=no	# Ist die lokale Cutlist vorhanden?
 input=""			# Eingabedatei/en
 LocalCutlistName=""	# Name der lokalen Cutlist
@@ -43,6 +43,8 @@ move=no				# Wenn $toprated=yes, und keine Cutlist gefunden wird, $film nach $ou
 decoder=""			# Pfad/Name des Decoders. Leer = automatische Suche (otrtool, dann otrdecoder).
 					# Wird hier oder in der Config etwas gesetzt, hat das Vorrang, z.B. /home/benutzer/bin/otrdecoder
 decoder_type=""		# Wird automatisch bestimmt: "otrtool" oder "otrdecoder" (steuert die Aufruf-Parameter)
+otr2_decoder=""		# Pfad zu otr_cli_decoder.py (dekodiert .otr2 und optional .otrkey). Leer = Suche auf PATH.
+otr2_python="python3"	# Python-Interpreter fuer otr_cli_decoder.py (z.B. Pfad zu einem venv-Python)
 
 # Diese Variablen werden vom Benutzer gesetzt.
 # Sie sind für die Verwendung des Decoders gedacht.
@@ -235,7 +237,7 @@ fi
 # Wurde ein alternativer Ausgabeordner gewählt, wird geprüft ob er vorhanden ist.
 # Ist er nicht vorhanden wird gefragt ob er erstellt werden soll.
 if [ "$output" == "cut" ]; then
-	if echo $i | grep -q .otrkey; then
+	if [[ "${i,,}" == *.otrkey || "${i,,}" == *.otr2 ]]; then
 		output="../$output"
 	fi
 	if [ ! -d "$output" ]; then
@@ -343,6 +345,15 @@ function detect_decoder ()
 		otrtool* )	decoder_type="otrtool" ;;
 		* )			decoder_type="otrdecoder" ;;
 	esac
+
+	# otr2-Decoder (Python) suchen: gesetzter Pfad hat Vorrang, sonst auf PATH.
+	if [ -n "$otr2_decoder" ] && [ -f "$otr2_decoder" ]; then
+		: # Vom Benutzer gesetzter otr2-Decoder wird verwendet.
+	elif command -v otr_cli_decoder.py >> /dev/null 2>&1; then
+		otr2_decoder=$(command -v otr_cli_decoder.py)
+	else
+		otr2_decoder=""
+	fi
 }
 
 # Diese Funktion überprüft ob ffmpeg installiert ist und sucht den Decoder
@@ -369,15 +380,27 @@ else
 	echo -e "${gelb}keiner gefunden${normal}"
 	echo -e "${gelb}Hinweis: .otrkey-Dateien können ohne otrtool oder otrdecoder nicht dekodiert werden.${normal}"
 fi
+echo -n "Suche nach einem .otr2-Decoder --> "
+if [ -n "$otr2_decoder" ]; then
+	echo -e "${gruen}$otr2_decoder${normal}"
+else
+	echo -e "${gelb}keiner gefunden${normal}"
+	echo -e "${gelb}Hinweis: .otr2-Dateien benoetigen otr_cli_decoder.py (Variable otr2_decoder setzen).${normal}"
+fi
 }
 
 # Diese Funktion definiert den Cutlist- und Dateinamen und üperprüft um welches Dateiformat es sich handelt
 function name ()
 {
-film=$i # Der komplette Filmname und gegebenfalls der Pfad
-film_ohne_anfang=$i
-film_ohne_anfang=${film_ohne_anfang%%.otrkey}
-film_ohne_anfang=${film_ohne_anfang##*/}
+film=$i # Der komplette Filmname und gegebenenfalls der Pfad
+film_ohne_anfang=${i##*/}   # nur der Dateiname ohne Pfad
+# Quell-Endung entfernen. Eine .otr2 wird vom Decoder IMMER zu einer .mp4,
+# daher wird .otr2 durch .mp4 ersetzt, damit der spaetere Dateiname stimmt.
+if [[ "${film_ohne_anfang,,}" == *.otr2 ]]; then
+	film_ohne_anfang="${film_ohne_anfang%.*}.mp4"
+else
+	film_ohne_anfang=${film_ohne_anfang%.otrkey}
+fi
 film=$film_ohne_anfang
 
 echo -n "Überprüfe um welches Aufnahmeformat es sich handelt --> "
@@ -401,6 +424,14 @@ elif echo "$film_ohne_anfang" | grep -q ".mpg.avi"; then # Wenn es sich um eine 
 	film_ohne_ende=${film%%.mpg.avi} # Filmname ohne Dateiendung
 	format=avi
 	echo -e "${blau}avi${normal}"
+fi
+
+# Basisname einheitlich ableiten. Bei Namen mit ".mpg" wird ab dort abgeschnitten,
+# ansonsten (z.B. neue xy.HQ.mp4 ohne .mpg) die letzten beiden Endungen.
+if [[ "$film" == *.mpg.* ]]; then
+	film_ohne_ende=${film%%.mpg.*}
+else
+	film_ohne_ende=${film%.*.*}
 fi
 
 outputfile=""
@@ -508,17 +539,23 @@ fi
 function load_py ()
 {
 vorhanden=no
-# Avidemux speichert das Projekt-Skript je nach Version unterschiedlich, z.B. für
-# xyz.mpg.HQ.avi:
-#   xyz.mpg.HQ.py  -> nur die letzte Endung ersetzt (altes Verhalten)
-#   xyz.mpg.py     -> nach .mpg abgeschnitten (neuere Avidemux-Versionen)
-#   xyz.py         -> ganz ohne Aufnahme-Endung
-for cut_py in "${film%.*}.py" "${film_ohne_ende}.mpg.py" "${film_ohne_ende}.py"; do
+# Avidemux benennt das Projekt-Skript je nach Version/Format unterschiedlich. Statt feste
+# Kandidaten zu raten, wird vom Videonamen ausgehend schrittweise je eine Endung abgeschnitten
+# und nach einer passenden .py gesucht. Das deckt u.a. ab:
+#   xyz.mpg.HQ.avi -> xyz.mpg.HQ.py / xyz.mpg.py / xyz.py
+#   xy.HQ.mp4      -> xy.HQ.py / xy.py
+basis=$film
+while true; do
+	cut_py="${basis}.py"
 	if [ -f "$cut_py" ]; then
 		vorhanden="yes"
 		echo "Verwende $cut_py als Cutlist."
 		break
 	fi
+	if [[ "$basis" != *.* ]]; then
+		break
+	fi
+	basis=${basis%.*}
 done
 }
 
@@ -1103,7 +1140,7 @@ fi
 # Hier wird ein Otrkey-File dekodiert, falls es gewünscht ist
 function decode ()
 {
-if echo $i | grep -q .otrkey; then
+if [[ "${i,,}" == *.otrkey || "${i,,}" == *.otr2 ]]; then
 	if [ ! "$email_checked" == "yes" ]; then
 		if [ "$email" == "" ]; then
 			echo -e "${rot}Kann nicht dekodieren da keine E-Mail-Adresse angegeben wurde!${normal}"
@@ -1115,18 +1152,33 @@ if echo $i | grep -q .otrkey; then
 			email_checked=yes
 		fi
 	fi
-	if [ -z "$decoder" ]; then
-		echo -e "${rot}Kein Decoder gefunden – \"$i\" kann nicht dekodiert werden.${normal}"
-		echo -e "${rot}Bitte otrtool oder otrdecoder installieren.${normal}"
-		exit 1
-	fi
-	echo "Decodiere Datei mit $decoder_type --> "
-	if [ "$decoder_type" == "otrtool" ]; then
+	# Endung bestimmen, um den passenden Decoder zu waehlen
+	endung=${i##*.}; endung=${endung,,}
+	if [ "$endung" == "otr2" ]; then
+		# .otr2 kann ausschliesslich der neue Python-Decoder (otr_cli_decoder.py)
+		if [ -z "$otr2_decoder" ]; then
+			echo -e "${rot}Fuer .otr2 wird otr_cli_decoder.py benoetigt. Bitte 'otr2_decoder' setzen.${normal}"
+			echo -e "${rot}Download: https://app.onlinetvrecorder.com/cli-dist/otr_cli_decoder.zip${normal}"
+			exit 1
+		fi
+		echo "Decodiere .otr2 mit otr_cli_decoder.py --> "
+		"$otr2_python" "$otr2_decoder" --email "$email" --password "$password" --zielordner "$tmp" --force --nicht-warten --no-update-check "$i"
+	elif [ "$decoder_type" == "otrtool" ] && [ -n "$decoder" ]; then
+		echo "Decodiere .otrkey mit otrtool --> "
 		# otrtool: -x dekodieren, -D Zielordner, otrkey als Positionsargument
 		"$decoder" -x -e "$email" -p "$password" -D "$tmp" "$i"
-	else
+	elif [ -n "$decoder" ]; then
+		echo "Decodiere .otrkey mit otrdecoder --> "
 		# otrdecoder: -i Input, -o Zielordner
 		"$decoder" -e "$email" -p "$password" -q -f -i "$i" -o "$tmp"
+	elif [ -n "$otr2_decoder" ]; then
+		# Kein otrtool/otrdecoder vorhanden - der Python-Decoder kann auch .otrkey
+		echo "Decodiere .otrkey mit otr_cli_decoder.py --> "
+		"$otr2_python" "$otr2_decoder" --email "$email" --password "$password" --zielordner "$tmp" --force --nicht-warten --no-update-check "$i"
+	else
+		echo -e "${rot}Kein passender Decoder gefunden - \"$i\" kann nicht dekodiert werden.${normal}"
+		echo -e "${rot}Fuer .otrkey: otrtool/otrdecoder installieren. Fuer .otr2: otr_cli_decoder.py.${normal}"
+		exit 1
 	fi
 	otrkey=$i
 	decoded=yes
